@@ -1,0 +1,257 @@
+version: "3.5"
+services:
+  elasticsearch:
+    container_name: temporal-elasticsearch
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - xpack.security.enabled=false
+    image: elasticsearch:${ELASTICSEARCH_VERSION}
+    networks:
+      - temporal-network
+    expose:
+      - 9200
+    volumes:
+      - /var/lib/elasticsearch/data
+
+  postgresql:
+    container_name: temporal-postgresql
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    image: postgres:${POSTGRESQL_VERSION}
+    networks:
+      - temporal-network
+    expose:
+      - 5432
+    volumes:
+      - /var/lib/postgresql/data
+
+  temporal:
+    container_name: temporal
+    depends_on:
+      - postgresql
+      - elasticsearch
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=true
+      - ES_SEEDS=elasticsearch
+      - ES_VERSION=v7
+    image: temporalio/auto-setup:${TEMPORAL_VERSION}
+    networks:
+      - temporal-network
+    ports:
+      - 7233:7233
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+
+  temporal-admin-tools:
+    container_name: temporal-admin-tools
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
+    networks:
+      - temporal-network
+    stdin_open: true
+    tty: true
+
+  temporal-ui:
+    container_name: temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    image: temporalio/ui:${TEMPORAL_UI_VERSION}
+    networks:
+      - temporal-network
+    ports:
+      - 8080:8080
+
+  postgres-bets:
+    image: postgres:latest
+    container_name: postgres-bets
+    environment:
+      POSTGRES_DB: Bet
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MAX_CONNECTIONS: 500
+    ports:
+      - "5433:5432"
+    volumes:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - temporal-network
+      
+  postgres-customers:
+    image: postgres:latest
+    container_name: postgres-customers
+    environment:
+      POSTGRES_DB: Customers
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MAX_CONNECTIONS: 500
+    ports:
+      - "5434:5432"
+    volumes:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - temporal-network
+      
+  postgres-wallets:
+    image: postgres:latest
+    container_name: postgres-wallets
+    environment:
+      POSTGRES_DB: Wallets
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MAX_CONNECTIONS: 500
+    ports:
+      - "5435:5432"
+    volumes:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - temporal-network
+      
+  wallet-api:
+    build:
+      context: .
+      dockerfile: ./Wallets.Api/Dockerfile
+    environment:
+      - TemporalioHost=temporal:7233
+    depends_on:
+      - wallet-worker
+    ports:
+      - "5000:8080"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+
+  wallet-worker:
+    build:
+      context: .
+      dockerfile: ./Wallets.Workers/Dockerfile
+    environment:
+      - ConnectionStrings__WriterConnection=Host=postgres-wallets;Database=Wallets;Username=postgres;Password=postgres
+      - ConnectionStrings__ReaderConnection=Host=postgres-wallets;Database=Wallets;Username=postgres;Password=postgres
+      - TemporalioHost=temporal:7233
+    depends_on:
+      - postgres-wallets
+      - temporal
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+      
+  bet-api:
+    build:
+      context: .
+      dockerfile: ./Bets.Api/Dockerfile
+    environment:
+      - TemporalioHost=temporal:7233
+    depends_on:
+      - wallet-worker
+    ports:
+      - "5001:8080"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+
+  bet-worker:
+    build:
+      context: .
+      dockerfile: ./Bets.Workers/Dockerfile
+    environment:
+      - ConnectionStrings__WriterConnection=Host=postgres-bets;Database=Bet;Username=postgres;Password=postgres
+      - ConnectionStrings__ReaderConnection=Host=postgres-bets;Database=Bet;Username=postgres;Password=postgres
+      - TemporalioHost=temporal:7233
+      - WalletHost=http://wallet-api:8080
+      - LimitHost=http://limit-api:8080
+      - RiskHost=http://risk-api:8080
+    depends_on:
+      - postgres-bets
+      - wallet-api
+      - temporal
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+      
+  risk-api:
+    build:
+      context: .
+      dockerfile: ./Risks.Api/Dockerfile
+    environment:
+      - TemporalioHost=temporal:7233
+    depends_on:
+      - wallet-worker
+    ports:
+      - "5002:8080"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+      
+  limit-api:
+    build:
+      context: .
+      dockerfile: ./Limits.Api/Dockerfile
+    environment:
+      - TemporalioHost=temporal:7233
+    depends_on:
+      - wallet-worker
+    ports:
+      - "5003:8080"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - temporal-network
+
+networks:
+  temporal-network:
+    driver: bridge
+    name: temporal-network
