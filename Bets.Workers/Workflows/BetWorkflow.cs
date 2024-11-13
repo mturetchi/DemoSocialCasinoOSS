@@ -17,10 +17,10 @@ public class BetWorkflow : IBetWorkflow
     {
         var retryPolicy = new RetryPolicy
         {
-            InitialInterval = TimeSpan.FromSeconds(1),
+            InitialInterval = TimeSpan.FromSeconds(2),
             MaximumInterval = TimeSpan.FromSeconds(100),
             BackoffCoefficient = 2,
-            MaximumAttempts = 3,
+            MaximumAttempts = 10,
             NonRetryableErrorTypes = ["InvalidAccountException", "InsufficientFundsException"]
         };
 
@@ -49,8 +49,11 @@ public class BetWorkflow : IBetWorkflow
         // Risks validation
         // ....
         // ----------------
+
+        var trxId = Guid.NewGuid();
+
         var withdrawResult = await Workflow.ExecuteActivityAsync(
-            (BetActivity activity) => activity.WithdrawAsync(request.UserId, request.Amount),
+            (BetActivity activity) => activity.WithdrawAsync(request.UserId, request.Amount, trxId),
             new ActivityOptions
             {
                 StartToCloseTimeout = TimeSpan.FromMinutes(5),
@@ -74,7 +77,8 @@ public class BetWorkflow : IBetWorkflow
             new ChildWorkflowOptions
             {
                 Id = $"bet-limit-workflow-{Guid.NewGuid()}",
-                ParentClosePolicy = ParentClosePolicy.Abandon
+                ParentClosePolicy = ParentClosePolicy.Abandon,
+                RetryPolicy = retryPolicy
             });
 
         await Workflow.StartChildWorkflowAsync(
@@ -82,7 +86,8 @@ public class BetWorkflow : IBetWorkflow
             new ChildWorkflowOptions
             {
                 Id = $"bet-risk-workflow-{Guid.NewGuid()}",
-                ParentClosePolicy = ParentClosePolicy.Abandon
+                ParentClosePolicy = ParentClosePolicy.Abandon,
+                RetryPolicy = retryPolicy
             });
 
         return bet;
